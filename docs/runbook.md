@@ -5,7 +5,7 @@ Operational notes for local development and future production support.
 ## Local Startup
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
@@ -27,9 +27,9 @@ Expected response:
 ## Scan Endpoint Smoke Test
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/v1/scan \
+curl -X POST http://127.0.0.1:8000/scan \
   -H "Content-Type: application/json" \
-  -d '{"document_type":"invoice","planfix_task_id":"12345"}'
+  -d '{"planfix_task_id":52418,"doc_type":"NKL","number":"001","date":"2026-06-24"}'
 ```
 
 Expected response:
@@ -49,7 +49,8 @@ Important settings:
 
 - `APP_ENV`
 - `DEBUG`
-- `STORAGE_DIR`
+- `SCANNER_INBOX_DIR`
+- `ARCHIVE_DIR`
 - `PLANFIX_BASE_URL`
 - `PLANFIX_API_TOKEN`
 - `PLANFIX_TIMEOUT_SECONDS`
@@ -58,6 +59,5 @@ Important settings:
 
 - If the app does not start, confirm dependencies are installed from `requirements.txt`.
 - If settings are not applied, confirm `.env` exists in the process working directory.
-- If storage fails later, confirm the process can create and write to `STORAGE_DIR`.
+- If storage fails later, confirm the process can create and write to archive directories.
 - Real scanner and Planfix behavior is not available in the current skeleton.
-

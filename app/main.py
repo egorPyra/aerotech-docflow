@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from uuid import UUID
 
 from fastapi import (
+    Depends,
     FastAPI,
     HTTPException,
     Query,
@@ -26,6 +27,7 @@ from app.schemas import (
     ScanAcceptedResponse,
     ScanRequest,
 )
+from app.security import require_api_key
 from app.service import (
     cancel_scan_job,
     start_scan_job,
@@ -70,7 +72,7 @@ async def lifespan(
 app = FastAPI(
     title="Aerotech Docflow",
     description="Backend-сервис обработки документов",
-    version="0.7.0",
+    version="0.8.0",
     lifespan=lifespan,
 )
 
@@ -101,6 +103,9 @@ async def health_check() -> dict[str, str]:
     "/scan",
     response_model=ScanAcceptedResponse,
     status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[
+        Depends(require_api_key),
+    ],
 )
 async def start_scan(
     payload: ScanRequest,
@@ -167,6 +172,9 @@ async def start_scan(
 @app.get(
     "/jobs",
     response_model=list[JobResponse],
+    dependencies=[
+        Depends(require_api_key),
+    ],
 )
 async def list_jobs(
     limit: int = Query(
@@ -190,6 +198,9 @@ async def list_jobs(
 @app.get(
     "/jobs/{request_id}",
     response_model=JobResponse,
+    dependencies=[
+        Depends(require_api_key),
+    ],
 )
 async def get_job(
     request_id: UUID,
@@ -212,6 +223,9 @@ async def get_job(
 @app.post(
     "/jobs/{request_id}/cancel",
     response_model=CancelJobResponse,
+    dependencies=[
+        Depends(require_api_key),
+    ],
 )
 async def cancel_job(
     request_id: UUID,
@@ -317,6 +331,9 @@ async def cancel_job(
     "/jobs/{request_id}/retry",
     response_model=RetryJobResponse,
     status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[
+        Depends(require_api_key),
+    ],
 )
 async def retry_job(
     request_id: UUID,

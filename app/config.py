@@ -20,6 +20,8 @@ class Settings:
     scan_poll_interval_seconds: float
     scan_stable_checks: int
 
+    api_key: str
+
 
 settings = Settings(
     scan_inbox=Path(
@@ -58,4 +60,8 @@ settings = Settings(
             "3",
         )
     ),
+    api_key=os.getenv(
+        "API_KEY",
+        "",
+    ).strip(),
 )

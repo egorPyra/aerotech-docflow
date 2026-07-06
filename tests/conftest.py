@@ -2,14 +2,19 @@
 
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app import main as main_module
+from app import security as security_module
 from app.repository import JobRepository
 from app.schemas import ScanRequest
+
+
+TEST_API_KEY = "test-aerotech-api-key"
 
 
 @pytest.fixture
@@ -48,7 +53,7 @@ def client(
     ],
     cancelled_jobs: list[UUID],
 ) -> Iterator[TestClient]:
-    """Создать тестовый HTTP-клиент."""
+    """Создать авторизованный тестовый HTTP-клиент."""
 
     def fake_start_scan_job(
         request_id: UUID,
@@ -88,7 +93,21 @@ def client(
         fake_cancel_scan_job,
     )
 
+    monkeypatch.setattr(
+        security_module,
+        "settings",
+        SimpleNamespace(
+            api_key=TEST_API_KEY,
+        ),
+    )
+
     with TestClient(
         main_module.app
     ) as test_client:
+        test_client.headers.update(
+            {
+                "X-API-Key": TEST_API_KEY,
+            }
+        )
+
         yield test_client

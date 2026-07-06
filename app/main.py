@@ -1,31 +1,91 @@
-"""FastAPI application entrypoint.
+"""Точка входа FastAPI-сервиса Aerotech Docflow."""
 
-This module creates the HTTP application and wires API routers. Keep startup
-logic small here; application behavior should live in dedicated modules.
-"""
+import logging
+from datetime import date as Date
+from typing import Literal
 
 from fastapi import FastAPI
+from pydantic import BaseModel, Field
 
-from app.api.router import api_router
-from app.core.config import settings
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+
+logger = logging.getLogger("aerotech-docflow")
 
 
-def create_app() -> FastAPI:
-    """Create and configure the FastAPI application."""
-    app = FastAPI(
-        title=settings.app_name,
-        debug=settings.debug,
+class ScanRequest(BaseModel):
+    """Данные, необходимые для запуска обработки документа."""
+
+    planfix_task_id: int = Field(
+        gt=0,
+        description="Идентификатор задачи Planfix",
+    )
+    doc_type: str = Field(
+        min_length=1,
+        max_length=20,
+        description="Код типа документа",
+        examples=["NKL"],
+    )
+    number: str = Field(
+        min_length=1,
+        max_length=100,
+        description="Номер документа",
+        examples=["001"],
+    )
+    date: Date = Field(
+        description="Дата документа",
+        examples=["2026-06-24"],
+    )
+    counterparty: str | None = Field(
+        default=None,
+        max_length=255,
+        description="Контрагент",
     )
 
-    app.include_router(api_router, prefix=settings.api_v1_prefix)
 
-    @app.get("/health", tags=["health"])
-    async def health_check() -> dict[str, str]:
-        """Return a minimal health response for local checks and monitoring."""
-        return {"status": "ok"}
+class ScanResponse(BaseModel):
+    """Ответ на запрос запуска обработки."""
 
-    return app
+    status: Literal["ok"]
+    planfix_task_id: int
+    message: str
 
 
-app = create_app()
+app = FastAPI(
+    title="Aerotech Docflow",
+    description="Backend-сервис обработки и сканирования документов",
+    version="0.1.0",
+)
 
+
+@app.get("/health", tags=["Состояние"])
+async def health_check() -> dict[str, str]:
+    """Проверить, что сервис запущен."""
+
+    return {"status": "ok"}
+
+
+@app.post("/scan", response_model=ScanResponse, tags=["Сканирование"])
+async def start_scan(request: ScanRequest) -> ScanResponse:
+    """Принять запрос и запустить обработку документа."""
+
+    logger.info(
+        "Получен запрос на обработку: task_id=%s, type=%s, number=%s",
+        request.planfix_task_id,
+        request.doc_type,
+        request.number,
+    )
+
+    # В следующих этапах здесь будет вызываться сервис обработки:
+    #
+    # result = await process_document(request)
+    #
+    # Пока только подтверждаем получение корректного запроса.
+
+    return ScanResponse(
+        status="ok",
+        planfix_task_id=request.planfix_task_id,
+        message="Запрос принят",
+    )

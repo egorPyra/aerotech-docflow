@@ -17,6 +17,7 @@ class JobStatus(str, Enum):
     ARCHIVING = "archiving"
     DONE = "done"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class ScanRequest(BaseModel):
@@ -26,8 +27,7 @@ class ScanRequest(BaseModel):
         min_length=1,
         max_length=128,
         description=(
-            "Уникальный идентификатор запроса внешней системы. "
-            "Повторный запрос с тем же значением не создаёт новое задание."
+            "Уникальный идентификатор запроса внешней системы"
         ),
         examples=["planfix-scan-52418-001"],
     )
@@ -76,12 +76,19 @@ class ScanAcceptedResponse(BaseModel):
     status_url: str
 
 
+class CancelJobResponse(BaseModel):
+    """Ответ после отмены задания."""
+
+    status: Literal["cancelled"]
+    request_id: UUID
+    job_status: JobStatus
+    message: str
+
+
 class JobResponse(BaseModel):
     """Текущее состояние задания."""
 
     request_id: UUID
-
-    # У старых записей, созданных до миграции, значение будет None.
     external_request_id: str | None
 
     task_id: int

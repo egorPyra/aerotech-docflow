@@ -4,8 +4,12 @@ from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 
-from app.schemas import ScanRequest
+from app.repository import JobRepository
 
+from app.schemas import (
+    JobStatus,
+    ScanRequest,
+)
 
 VALID_SCAN_REQUEST = {
     "external_request_id": "planfix-scan-52418-001",

@@ -18,11 +18,16 @@ from app.repository import (
     job_repository,
 )
 from app.schemas import (
+    CancelJobResponse,
     JobResponse,
+    JobStatus,
     ScanAcceptedResponse,
     ScanRequest,
 )
-from app.service import start_scan_job
+from app.service import (
+    cancel_scan_job,
+    start_scan_job,
+)
 
 
 logging.basicConfig(
@@ -63,7 +68,7 @@ async def lifespan(
 app = FastAPI(
     title="Aerotech Docflow",
     description="Backend-сервис обработки документов",
-    version="0.5.0",
+    version="0.6.0",
     lifespan=lifespan,
 )
 
@@ -122,7 +127,9 @@ async def start_scan(
 
         logger.info(
             "Создано задание: "
-            "request_id=%s external_request_id=%s task_id=%s",
+            "request_id=%s "
+            "external_request_id=%s "
+            "task_id=%s",
             job.request_id,
             payload.external_request_id,
             job.task_id,
@@ -137,7 +144,8 @@ async def start_scan(
     else:
         logger.info(
             "Получен повторный запрос: "
-            "request_id=%s external_request_id=%s",
+            "request_id=%s "
+            "external_request_id=%s",
             job.request_id,
             payload.external_request_id,
         )
@@ -195,3 +203,107 @@ async def get_job(
         )
 
     return job
+
+
+@app.post(
+    "/jobs/{request_id}/cancel",
+    response_model=CancelJobResponse,
+)
+async def cancel_job(
+    request_id: UUID,
+) -> CancelJobResponse:
+    """Отменить задание, которое ещё ожидает PDF."""
+
+    job = job_repository.get(
+        request_id
+    )
+
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Задание не найдено",
+        )
+
+    cancellable_statuses = {
+        JobStatus.ACCEPTED,
+        JobStatus.WAITING_FOR_FILE,
+    }
+
+    if job.status not in cancellable_statuses:
+        if job.status == JobStatus.CANCELLED:
+            detail = "Задание уже отменено"
+
+        elif job.status == JobStatus.DONE:
+            detail = (
+                "Завершённое задание нельзя отменить"
+            )
+
+        elif job.status == JobStatus.FAILED:
+            detail = (
+                "Неудачное задание нельзя отменить"
+            )
+
+        else:
+            detail = (
+                "PDF уже получен. "
+                "Задание нельзя безопасно отменить"
+            )
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=detail,
+        )
+
+    was_cancelled = await cancel_scan_job(
+        request_id
+    )
+
+    if not was_cancelled:
+        refreshed_job = job_repository.get(
+            request_id
+        )
+
+        if (
+            refreshed_job is not None
+            and refreshed_job.status
+            not in cancellable_statuses
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Задание уже перешло "
+                    "в другое состояние"
+                ),
+            )
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Фоновая задача не найдена "
+                "или уже завершена"
+            ),
+        )
+
+    updated_job = job_repository.update_status(
+        request_id=request_id,
+        status=JobStatus.CANCELLED,
+        error=None,
+    )
+
+    if updated_job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Задание не найдено",
+        )
+
+    logger.info(
+        "Задание отменено: request_id=%s",
+        request_id,
+    )
+
+    return CancelJobResponse(
+        status="cancelled",
+        request_id=request_id,
+        job_status=updated_job.status,
+        message="Задание успешно отменено",
+    )

@@ -20,8 +20,11 @@ logger = logging.getLogger(__name__)
 # Один физический сканер обслуживает одно задание за раз.
 _scanner_lock = asyncio.Lock()
 
-# Сохраняем ссылки на фоновые задачи до их завершения.
-_running_tasks: set[asyncio.Task[None]] = set()
+# request_id → работающая фоновая задача.
+_running_tasks: dict[
+    UUID,
+    asyncio.Task[None],
+] = {}
 
 
 async def process_scan_job(
@@ -60,7 +63,9 @@ async def process_scan_job(
                 poll_interval_seconds=(
                     settings.scan_poll_interval_seconds
                 ),
-                stable_checks=settings.scan_stable_checks,
+                stable_checks=(
+                    settings.scan_stable_checks
+                ),
             )
 
             job_repository.set_source_file(
@@ -95,8 +100,12 @@ async def process_scan_job(
 
             job_repository.set_archive_result(
                 request_id=request_id,
-                result_file=str(archived_document.path),
-                result_filename=archived_document.filename,
+                result_file=str(
+                    archived_document.path
+                ),
+                result_filename=(
+                    archived_document.filename
+                ),
                 sha256=archived_document.sha256,
             )
 
@@ -112,6 +121,16 @@ async def process_scan_job(
                 archived_document.path,
                 archived_document.sha256,
             )
+
+    except asyncio.CancelledError:
+        logger.info(
+            "Фоновая обработка отменена: "
+            "request_id=%s",
+            request_id,
+        )
+
+        # Статус cancelled устанавливает HTTP endpoint.
+        raise
 
     except ScannerTimeoutError as error:
         logger.warning(
@@ -153,11 +172,41 @@ async def process_scan_job(
         )
 
 
+def _remove_finished_task(
+    request_id: UUID,
+    completed_task: asyncio.Task[None],
+) -> None:
+    """Удалить завершившуюся задачу из реестра."""
+
+    current_task = _running_tasks.get(
+        request_id
+    )
+
+    if current_task is completed_task:
+        _running_tasks.pop(
+            request_id,
+            None,
+        )
+
+
 def start_scan_job(
     request_id: UUID,
     payload: ScanRequest,
 ) -> None:
     """Запустить обработку в отдельной asyncio-задаче."""
+
+    existing_task = _running_tasks.get(
+        request_id
+    )
+
+    if (
+        existing_task is not None
+        and not existing_task.done()
+    ):
+        raise RuntimeError(
+            "Задание уже запущено: "
+            f"{request_id}"
+        )
 
     task = asyncio.create_task(
         process_scan_job(
@@ -166,5 +215,44 @@ def start_scan_job(
         )
     )
 
-    _running_tasks.add(task)
-    task.add_done_callback(_running_tasks.discard)
+    _running_tasks[request_id] = task
+
+    task.add_done_callback(
+        lambda completed_task: _remove_finished_task(
+            request_id=request_id,
+            completed_task=completed_task,
+        )
+    )
+
+
+async def cancel_scan_job(
+    request_id: UUID,
+) -> bool:
+    """
+    Отменить работающую фоновую задачу.
+
+    Возвращает True, если задача была найдена и отменена.
+    """
+
+    task = _running_tasks.get(
+        request_id
+    )
+
+    if task is None:
+        return False
+
+    if task.done():
+        _running_tasks.pop(
+            request_id,
+            None,
+        )
+        return False
+
+    task.cancel()
+
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    return True

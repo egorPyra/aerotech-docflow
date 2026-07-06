@@ -27,7 +27,14 @@ def repository(
 def started_jobs() -> list[
     tuple[UUID, ScanRequest]
 ]:
-    """Список заданий, переданных фоновой обработке."""
+    """Задания, переданные фоновой обработке."""
+
+    return []
+
+
+@pytest.fixture
+def cancelled_jobs() -> list[UUID]:
+    """Задания, переданные функции отмены."""
 
     return []
 
@@ -36,7 +43,10 @@ def started_jobs() -> list[
 def client(
     monkeypatch: pytest.MonkeyPatch,
     repository: JobRepository,
-    started_jobs: list[tuple[UUID, ScanRequest]],
+    started_jobs: list[
+        tuple[UUID, ScanRequest]
+    ],
+    cancelled_jobs: list[UUID],
 ) -> Iterator[TestClient]:
     """Создать тестовый HTTP-клиент."""
 
@@ -51,6 +61,15 @@ def client(
             )
         )
 
+    async def fake_cancel_scan_job(
+        request_id: UUID,
+    ) -> bool:
+        cancelled_jobs.append(
+            request_id
+        )
+
+        return True
+
     monkeypatch.setattr(
         main_module,
         "job_repository",
@@ -63,5 +82,13 @@ def client(
         fake_start_scan_job,
     )
 
-    with TestClient(main_module.app) as test_client:
+    monkeypatch.setattr(
+        main_module,
+        "cancel_scan_job",
+        fake_cancel_scan_job,
+    )
+
+    with TestClient(
+        main_module.app
+    ) as test_client:
         yield test_client

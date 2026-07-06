@@ -1,26 +1,138 @@
-"""Временное хранилище заданий в памяти приложения."""
+"""Хранилище заданий в SQLite."""
 
+import json
+import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 from threading import RLock
 from uuid import UUID, uuid4
 
+from app.config import settings
 from app.schemas import JobResponse, JobStatus, ScanRequest
 
 
 class JobRepository:
-    """Управляет заданиями на обработку документов."""
+    """Управляет заданиями, сохранёнными в SQLite."""
 
-    def __init__(self) -> None:
-        self._jobs: dict[UUID, JobResponse] = {}
+    def __init__(self, database_path: Path) -> None:
+        self._database_path = database_path
         self._lock = RLock()
 
-    def create(self, payload: ScanRequest) -> JobResponse:
+        self._initialize_database()
+
+    def _connect(self) -> sqlite3.Connection:
+        """Создать соединение с SQLite."""
+
+        connection = sqlite3.connect(
+            self._database_path,
+            timeout=30,
+        )
+
+        connection.row_factory = sqlite3.Row
+
+        return connection
+
+    def _initialize_database(self) -> None:
+        """Создать файл базы и таблицу заданий."""
+
+        self._database_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        with self._connect() as connection:
+            connection.execute(
+                "PRAGMA journal_mode = WAL"
+            )
+
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS jobs (
+                    request_id TEXT PRIMARY KEY,
+                    task_id INTEGER NOT NULL,
+
+                    document_type TEXT NOT NULL,
+                    document_number TEXT NOT NULL,
+                    user_code TEXT NOT NULL,
+
+                    context_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+
+                    source_file TEXT,
+                    result_file TEXT,
+                    result_filename TEXT,
+                    sha256 TEXT,
+
+                    error TEXT
+                )
+                """
+            )
+
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                idx_jobs_created_at
+                ON jobs(created_at)
+                """
+            )
+
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                idx_jobs_task_id
+                ON jobs(task_id)
+                """
+            )
+
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                idx_jobs_status
+                ON jobs(status)
+                """
+            )
+
+    @staticmethod
+    def _row_to_job(
+        row: sqlite3.Row,
+    ) -> JobResponse:
+        """Преобразовать строку SQLite в JobResponse."""
+
+        return JobResponse(
+            request_id=UUID(row["request_id"]),
+            task_id=row["task_id"],
+            document_type=row["document_type"],
+            document_number=row["document_number"],
+            user_code=row["user_code"],
+            context=json.loads(row["context_json"]),
+            status=JobStatus(row["status"]),
+            created_at=datetime.fromisoformat(
+                row["created_at"]
+            ),
+            updated_at=datetime.fromisoformat(
+                row["updated_at"]
+            ),
+            source_file=row["source_file"],
+            result_file=row["result_file"],
+            result_filename=row["result_filename"],
+            sha256=row["sha256"],
+            error=row["error"],
+        )
+
+    def create(
+        self,
+        payload: ScanRequest,
+    ) -> JobResponse:
         """Создать новое задание."""
 
         now = datetime.now(timezone.utc)
+        request_id = uuid4()
 
         job = JobResponse(
-            request_id=uuid4(),
+            request_id=request_id,
             task_id=payload.task_id,
             document_type=payload.document_type,
             document_number=payload.document_number,
@@ -37,20 +149,101 @@ class JobRepository:
         )
 
         with self._lock:
-            self._jobs[job.request_id] = job
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO jobs (
+                        request_id,
+                        task_id,
+                        document_type,
+                        document_number,
+                        user_code,
+                        context_json,
+                        status,
+                        created_at,
+                        updated_at,
+                        source_file,
+                        result_file,
+                        result_filename,
+                        sha256,
+                        error
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(job.request_id),
+                        job.task_id,
+                        job.document_type,
+                        job.document_number,
+                        job.user_code,
+                        json.dumps(
+                            job.context,
+                            ensure_ascii=False,
+                        ),
+                        job.status.value,
+                        job.created_at.isoformat(),
+                        job.updated_at.isoformat(),
+                        job.source_file,
+                        job.result_file,
+                        job.result_filename,
+                        job.sha256,
+                        job.error,
+                    ),
+                )
 
-        return job.model_copy(deep=True)
+        return job
 
-    def get(self, request_id: UUID) -> JobResponse | None:
+    def get(
+        self,
+        request_id: UUID,
+    ) -> JobResponse | None:
         """Получить задание по request_id."""
 
         with self._lock:
-            job = self._jobs.get(request_id)
+            with self._connect() as connection:
+                row = connection.execute(
+                    """
+                    SELECT *
+                    FROM jobs
+                    WHERE request_id = ?
+                    """,
+                    (
+                        str(request_id),
+                    ),
+                ).fetchone()
 
-            if job is None:
-                return None
+        if row is None:
+            return None
 
-            return job.model_copy(deep=True)
+        return self._row_to_job(row)
+
+    def list(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[JobResponse]:
+        """Получить список заданий."""
+
+        with self._lock:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT *
+                    FROM jobs
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    OFFSET ?
+                    """,
+                    (
+                        limit,
+                        offset,
+                    ),
+                ).fetchall()
+
+        return [
+            self._row_to_job(row)
+            for row in rows
+        ]
 
     def update_status(
         self,
@@ -60,47 +253,66 @@ class JobRepository:
     ) -> JobResponse | None:
         """Изменить статус задания."""
 
+        updated_at = datetime.now(
+            timezone.utc
+        ).isoformat()
+
         with self._lock:
-            current_job = self._jobs.get(request_id)
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    UPDATE jobs
+                    SET
+                        status = ?,
+                        error = ?,
+                        updated_at = ?
+                    WHERE request_id = ?
+                    """,
+                    (
+                        status.value,
+                        error,
+                        updated_at,
+                        str(request_id),
+                    ),
+                )
 
-            if current_job is None:
-                return None
+                if cursor.rowcount == 0:
+                    return None
 
-            updated_job = current_job.model_copy(
-                update={
-                    "status": status,
-                    "error": error,
-                    "updated_at": datetime.now(timezone.utc),
-                }
-            )
-
-            self._jobs[request_id] = updated_job
-
-            return updated_job.model_copy(deep=True)
+        return self.get(request_id)
 
     def set_source_file(
         self,
         request_id: UUID,
         source_file: str,
     ) -> JobResponse | None:
-        """Записать путь к PDF из папки сканера."""
+        """Записать первоначальный путь к PDF."""
+
+        updated_at = datetime.now(
+            timezone.utc
+        ).isoformat()
 
         with self._lock:
-            current_job = self._jobs.get(request_id)
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    UPDATE jobs
+                    SET
+                        source_file = ?,
+                        updated_at = ?
+                    WHERE request_id = ?
+                    """,
+                    (
+                        source_file,
+                        updated_at,
+                        str(request_id),
+                    ),
+                )
 
-            if current_job is None:
-                return None
+                if cursor.rowcount == 0:
+                    return None
 
-            updated_job = current_job.model_copy(
-                update={
-                    "source_file": source_file,
-                    "updated_at": datetime.now(timezone.utc),
-                }
-            )
-
-            self._jobs[request_id] = updated_job
-
-            return updated_job.model_copy(deep=True)
+        return self.get(request_id)
 
     def set_archive_result(
         self,
@@ -109,26 +321,93 @@ class JobRepository:
         result_filename: str,
         sha256: str,
     ) -> JobResponse | None:
-        """Записать результат архивирования документа."""
+        """Записать результат архивирования."""
+
+        updated_at = datetime.now(
+            timezone.utc
+        ).isoformat()
 
         with self._lock:
-            current_job = self._jobs.get(request_id)
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    UPDATE jobs
+                    SET
+                        result_file = ?,
+                        result_filename = ?,
+                        sha256 = ?,
+                        updated_at = ?
+                    WHERE request_id = ?
+                    """,
+                    (
+                        result_file,
+                        result_filename,
+                        sha256,
+                        updated_at,
+                        str(request_id),
+                    ),
+                )
 
-            if current_job is None:
-                return None
+                if cursor.rowcount == 0:
+                    return None
 
-            updated_job = current_job.model_copy(
-                update={
-                    "result_file": result_file,
-                    "result_filename": result_filename,
-                    "sha256": sha256,
-                    "updated_at": datetime.now(timezone.utc),
-                }
-            )
+        return self.get(request_id)
 
-            self._jobs[request_id] = updated_job
+    def mark_interrupted_jobs_failed(
+        self,
+    ) -> int:
+        """
+        Завершить задания, прерванные перезапуском сервиса.
 
-            return updated_job.model_copy(deep=True)
+        Автоматически продолжать ожидание сканера после перезапуска
+        пока небезопасно, поэтому такие задания помечаются как failed.
+        """
+
+        interrupted_statuses = (
+            JobStatus.ACCEPTED.value,
+            JobStatus.WAITING_FOR_FILE.value,
+            JobStatus.FILE_RECEIVED.value,
+            JobStatus.ARCHIVING.value,
+        )
+
+        updated_at = datetime.now(
+            timezone.utc
+        ).isoformat()
+
+        placeholders = ", ".join(
+            "?"
+            for _ in interrupted_statuses
+        )
+
+        query = f"""
+            UPDATE jobs
+            SET
+                status = ?,
+                error = ?,
+                updated_at = ?
+            WHERE status IN ({placeholders})
+        """
+
+        parameters = (
+            JobStatus.FAILED.value,
+            (
+                "Обработка была прервана "
+                "перезапуском backend-сервиса"
+            ),
+            updated_at,
+            *interrupted_statuses,
+        )
+
+        with self._lock:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    query,
+                    parameters,
+                )
+
+                return cursor.rowcount
 
 
-job_repository = JobRepository()
+job_repository = JobRepository(
+    database_path=settings.database_path
+)

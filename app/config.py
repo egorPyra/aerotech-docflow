@@ -14,6 +14,7 @@ class Settings:
 
     scan_inbox: Path
     archive_root: Path
+    database_path: Path
 
     scan_timeout_seconds: float
     scan_poll_interval_seconds: float
@@ -31,6 +32,12 @@ settings = Settings(
         os.getenv(
             "ARCHIVE_ROOT",
             str(PROJECT_ROOT / "data" / "archive"),
+        )
+    ),
+    database_path=Path(
+        os.getenv(
+            "DATABASE_PATH",
+            str(PROJECT_ROOT / "data" / "aerotech.db"),
         )
     ),
     scan_timeout_seconds=float(

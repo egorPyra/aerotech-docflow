@@ -13,6 +13,8 @@ class Settings:
     """Настройки backend-сервиса."""
 
     scan_inbox: Path
+    archive_root: Path
+
     scan_timeout_seconds: float
     scan_poll_interval_seconds: float
     scan_stable_checks: int
@@ -25,13 +27,28 @@ settings = Settings(
             str(PROJECT_ROOT / "data" / "incoming"),
         )
     ),
+    archive_root=Path(
+        os.getenv(
+            "ARCHIVE_ROOT",
+            str(PROJECT_ROOT / "data" / "archive"),
+        )
+    ),
     scan_timeout_seconds=float(
-        os.getenv("SCAN_TIMEOUT_SECONDS", "120")
+        os.getenv(
+            "SCAN_TIMEOUT_SECONDS",
+            "120",
+        )
     ),
     scan_poll_interval_seconds=float(
-        os.getenv("SCAN_POLL_INTERVAL_SECONDS", "1")
+        os.getenv(
+            "SCAN_POLL_INTERVAL_SECONDS",
+            "1",
+        )
     ),
     scan_stable_checks=int(
-        os.getenv("SCAN_STABLE_CHECKS", "3")
+        os.getenv(
+            "SCAN_STABLE_CHECKS",
+            "3",
+        )
     ),
 )

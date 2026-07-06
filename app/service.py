@@ -6,17 +6,21 @@ from uuid import UUID
 
 from app.config import settings
 from app.repository import job_repository
-from app.scanner import ScannerTimeoutError, wait_for_new_pdf
+from app.scanner import (
+    ScannerTimeoutError,
+    wait_for_new_pdf,
+)
 from app.schemas import JobStatus, ScanRequest
+from app.storage import StorageError, archive_pdf
 
 
 logger = logging.getLogger(__name__)
 
 
-# Один физический сканер может обслуживать только одно задание одновременно.
+# Один физический сканер обслуживает одно задание за раз.
 _scanner_lock = asyncio.Lock()
 
-# Храним ссылки на фоновые задачи, пока они не завершились.
+# Сохраняем ссылки на фоновые задачи до их завершения.
 _running_tasks: set[asyncio.Task[None]] = set()
 
 
@@ -24,7 +28,7 @@ async def process_scan_job(
     request_id: UUID,
     payload: ScanRequest,
 ) -> None:
-    """Дождаться PDF, созданного сканером."""
+    """Получить PDF и сохранить его в архиве."""
 
     try:
         logger.info(
@@ -34,8 +38,6 @@ async def process_scan_job(
             payload.task_id,
         )
 
-        # Пока другое задание работает со сканером,
-        # текущее остаётся в статусе accepted.
         async with _scanner_lock:
             job_repository.update_status(
                 request_id=request_id,
@@ -43,7 +45,8 @@ async def process_scan_job(
             )
 
             logger.info(
-                "Ожидание PDF: request_id=%s task_id=%s folder=%s",
+                "Ожидание PDF: "
+                "request_id=%s task_id=%s folder=%s",
                 request_id,
                 payload.task_id,
                 settings.scan_inbox,
@@ -51,21 +54,23 @@ async def process_scan_job(
 
             pdf_path = await wait_for_new_pdf(
                 folder=settings.scan_inbox,
-                timeout_seconds=settings.scan_timeout_seconds,
+                timeout_seconds=(
+                    settings.scan_timeout_seconds
+                ),
                 poll_interval_seconds=(
                     settings.scan_poll_interval_seconds
                 ),
                 stable_checks=settings.scan_stable_checks,
             )
 
+            job_repository.set_source_file(
+                request_id=request_id,
+                source_file=str(pdf_path),
+            )
+
             job_repository.update_status(
                 request_id=request_id,
                 status=JobStatus.FILE_RECEIVED,
-            )
-
-            job_repository.set_result_file(
-                request_id=request_id,
-                result_file=str(pdf_path),
             )
 
             logger.info(
@@ -74,11 +79,26 @@ async def process_scan_job(
                 pdf_path,
             )
 
-            # Позже здесь появятся:
-            # 1. переименование;
-            # 2. перемещение в архив;
-            # 3. вычисление SHA-256;
-            # 4. обновление Planfix.
+            job_repository.update_status(
+                request_id=request_id,
+                status=JobStatus.ARCHIVING,
+            )
+
+            archived_document = await asyncio.to_thread(
+                archive_pdf,
+                pdf_path,
+                settings.archive_root,
+                payload.document_type,
+                payload.document_number,
+                payload.user_code,
+            )
+
+            job_repository.set_archive_result(
+                request_id=request_id,
+                result_file=str(archived_document.path),
+                result_filename=archived_document.filename,
+                sha256=archived_document.sha256,
+            )
 
             job_repository.update_status(
                 request_id=request_id,
@@ -86,13 +106,30 @@ async def process_scan_job(
             )
 
             logger.info(
-                "Обработка завершена: request_id=%s",
+                "Документ сохранён: "
+                "request_id=%s file=%s sha256=%s",
                 request_id,
+                archived_document.path,
+                archived_document.sha256,
             )
 
     except ScannerTimeoutError as error:
         logger.warning(
-            "Истёк таймаут ожидания PDF: request_id=%s",
+            "Истёк таймаут ожидания PDF: "
+            "request_id=%s",
+            request_id,
+        )
+
+        job_repository.update_status(
+            request_id=request_id,
+            status=JobStatus.FAILED,
+            error=str(error),
+        )
+
+    except StorageError as error:
+        logger.exception(
+            "Ошибка сохранения документа: "
+            "request_id=%s",
             request_id,
         )
 
@@ -104,7 +141,8 @@ async def process_scan_job(
 
     except Exception as error:
         logger.exception(
-            "Ошибка обработки задания: request_id=%s",
+            "Неожиданная ошибка обработки: "
+            "request_id=%s",
             request_id,
         )
 

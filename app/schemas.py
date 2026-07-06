@@ -14,6 +14,7 @@ class JobStatus(str, Enum):
     ACCEPTED = "accepted"
     WAITING_FOR_FILE = "waiting_for_file"
     FILE_RECEIVED = "file_received"
+    ARCHIVING = "archiving"
     DONE = "done"
     FAILED = "failed"
 
@@ -27,12 +28,25 @@ class ScanRequest(BaseModel):
         examples=[52418],
     )
 
-    document_type: str | None = Field(
-        default=None,
+    document_type: str = Field(
         min_length=1,
         max_length=32,
         description="Код типа документа",
         examples=["UPD"],
+    )
+
+    document_number: str = Field(
+        min_length=1,
+        max_length=100,
+        description="Номер документа",
+        examples=["2455/1"],
+    )
+
+    user_code: str = Field(
+        min_length=1,
+        max_length=20,
+        description="Код пользователя",
+        examples=["IV"],
     )
 
     context: dict[str, Any] = Field(
@@ -54,13 +68,20 @@ class JobResponse(BaseModel):
 
     request_id: UUID
     task_id: int
-    document_type: str | None
-    context: dict[str, Any]
 
+    document_type: str
+    document_number: str
+    user_code: str
+
+    context: dict[str, Any]
     status: JobStatus
 
     created_at: datetime
     updated_at: datetime
 
+    source_file: str | None = None
     result_file: str | None = None
+    result_filename: str | None = None
+    sha256: str | None = None
+
     error: str | None = None

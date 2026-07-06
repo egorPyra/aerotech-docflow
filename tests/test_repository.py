@@ -57,6 +57,7 @@ def test_create_and_get_job(
     assert loaded_job.document_number == "2455/1"
     assert loaded_job.user_code == "IV"
     assert loaded_job.status == JobStatus.ACCEPTED
+    assert loaded_job.attempt_count == 1
     assert loaded_job.context == {
         "source": "planfix",
     }
@@ -92,6 +93,7 @@ def test_job_survives_repository_restart(
         loaded_job.external_request_id
         == created_job.external_request_id
     )
+    assert loaded_job.attempt_count == 1
 
 
 def test_update_status(
@@ -340,7 +342,7 @@ def test_duplicate_external_id_with_other_data_fails(
 def test_duplicate_external_id_with_other_number_fails(
     repository: JobRepository,
 ) -> None:
-    """Тот же внешний ID нельзя использовать с другим номером документа."""
+    """Тот же внешний ID нельзя использовать с другим номером."""
 
     first_payload = create_payload(
         external_request_id="number-conflict"
@@ -397,3 +399,56 @@ def test_duplicate_external_id_with_other_context_fails(
         repository.create_or_get(
             second_payload
         )
+
+
+def test_new_job_has_first_attempt(
+    repository: JobRepository,
+) -> None:
+    """Новое задание начинается с первой попытки."""
+
+    job = repository.create(
+        create_payload()
+    )
+
+    assert job.attempt_count == 1
+
+
+def test_prepare_retry_updates_job(
+    repository: JobRepository,
+) -> None:
+    """Failed-задание подготавливается к retry."""
+
+    job = repository.create(
+        create_payload()
+    )
+
+    repository.set_source_file(
+        request_id=job.request_id,
+        source_file=r"D:\incoming\scan.pdf",
+    )
+
+    repository.set_archive_result(
+        request_id=job.request_id,
+        result_file=r"D:\archive\result.pdf",
+        result_filename="result.pdf",
+        sha256="a" * 64,
+    )
+
+    repository.update_status(
+        request_id=job.request_id,
+        status=JobStatus.FAILED,
+        error="Тестовая ошибка",
+    )
+
+    retried_job = repository.prepare_retry(
+        job.request_id
+    )
+
+    assert retried_job is not None
+    assert retried_job.status == JobStatus.ACCEPTED
+    assert retried_job.attempt_count == 2
+    assert retried_job.source_file is None
+    assert retried_job.result_file is None
+    assert retried_job.result_filename is None
+    assert retried_job.sha256 is None
+    assert retried_job.error is None

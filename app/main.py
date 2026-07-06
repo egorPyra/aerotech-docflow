@@ -15,12 +15,14 @@ from fastapi import (
 
 from app.repository import (
     IdempotencyConflictError,
+    RetryNotAllowedError,
     job_repository,
 )
 from app.schemas import (
     CancelJobResponse,
     JobResponse,
     JobStatus,
+    RetryJobResponse,
     ScanAcceptedResponse,
     ScanRequest,
 )
@@ -45,7 +47,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(
     app: FastAPI,
 ) -> AsyncIterator[None]:
-    """Выполнить действия при запуске и остановке сервиса."""
+    """Действия при запуске и остановке сервиса."""
 
     interrupted_jobs = (
         job_repository.mark_interrupted_jobs_failed()
@@ -68,7 +70,7 @@ async def lifespan(
 app = FastAPI(
     title="Aerotech Docflow",
     description="Backend-сервис обработки документов",
-    version="0.6.0",
+    version="0.7.0",
     lifespan=lifespan,
 )
 
@@ -104,7 +106,7 @@ async def start_scan(
     payload: ScanRequest,
     response: Response,
 ) -> ScanAcceptedResponse:
-    """Идемпотентно создать задание на сканирование."""
+    """Идемпотентно создать задание."""
 
     try:
         creation_result = (
@@ -194,7 +196,9 @@ async def get_job(
 ) -> JobResponse:
     """Получить конкретное задание."""
 
-    job = job_repository.get(request_id)
+    job = job_repository.get(
+        request_id
+    )
 
     if job is None:
         raise HTTPException(
@@ -212,7 +216,7 @@ async def get_job(
 async def cancel_job(
     request_id: UUID,
 ) -> CancelJobResponse:
-    """Отменить задание, которое ещё ожидает PDF."""
+    """Отменить задание, ожидающее PDF."""
 
     job = job_repository.get(
         request_id
@@ -306,4 +310,117 @@ async def cancel_job(
         request_id=request_id,
         job_status=updated_job.status,
         message="Задание успешно отменено",
+    )
+
+
+@app.post(
+    "/jobs/{request_id}/retry",
+    response_model=RetryJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def retry_job(
+    request_id: UUID,
+) -> RetryJobResponse:
+    """Повторно запустить failed или cancelled задание."""
+
+    try:
+        updated_job = (
+            job_repository.prepare_retry(
+                request_id
+            )
+        )
+
+    except RetryNotAllowedError as error:
+        current_status = error.current_status
+
+        if current_status == JobStatus.DONE:
+            detail = (
+                "Завершённое задание "
+                "нельзя повторно запустить"
+            )
+
+        elif current_status in {
+            JobStatus.ACCEPTED,
+            JobStatus.WAITING_FOR_FILE,
+            JobStatus.FILE_RECEIVED,
+            JobStatus.ARCHIVING,
+        }:
+            detail = (
+                "Задание уже активно "
+                "или находится в процессе обработки"
+            )
+
+        else:
+            detail = (
+                "Задание нельзя повторно запустить "
+                f"из статуса {current_status.value}"
+            )
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=detail,
+        ) from error
+
+    if updated_job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Задание не найдено",
+        )
+
+    payload = ScanRequest(
+        external_request_id=(
+            updated_job.external_request_id
+            or f"legacy-retry-{updated_job.request_id}"
+        ),
+        task_id=updated_job.task_id,
+        document_type=updated_job.document_type,
+        document_number=updated_job.document_number,
+        user_code=updated_job.user_code,
+        context=updated_job.context,
+    )
+
+    try:
+        start_scan_job(
+            request_id=updated_job.request_id,
+            payload=payload,
+        )
+
+    except Exception as error:
+        job_repository.update_status(
+            request_id=updated_job.request_id,
+            status=JobStatus.FAILED,
+            error=(
+                "Не удалось повторно запустить "
+                f"фоновую задачу: {error}"
+            ),
+        )
+
+        logger.exception(
+            "Ошибка повторного запуска: "
+            "request_id=%s",
+            updated_job.request_id,
+        )
+
+        raise HTTPException(
+            status_code=(
+                status.HTTP_500_INTERNAL_SERVER_ERROR
+            ),
+            detail=(
+                "Не удалось повторно запустить задание"
+            ),
+        ) from error
+
+    logger.info(
+        "Задание повторно запущено: "
+        "request_id=%s attempt_count=%s",
+        updated_job.request_id,
+        updated_job.attempt_count,
+    )
+
+    return RetryJobResponse(
+        status="accepted",
+        request_id=updated_job.request_id,
+        job_status=updated_job.status,
+        attempt_count=updated_job.attempt_count,
+        message="Задание повторно запущено",
     )

@@ -9,7 +9,11 @@ from threading import RLock
 from uuid import UUID, uuid4
 
 from app.config import settings
-from app.schemas import JobResponse, JobStatus, ScanRequest
+from app.schemas import (
+    JobResponse,
+    JobStatus,
+    ScanRequest,
+)
 
 
 class IdempotencyConflictError(RuntimeError):
@@ -17,6 +21,21 @@ class IdempotencyConflictError(RuntimeError):
     Один external_request_id был использован
     для двух разных запросов.
     """
+
+
+class RetryNotAllowedError(RuntimeError):
+    """Задание находится в статусе, запрещающем retry."""
+
+    def __init__(
+        self,
+        current_status: JobStatus,
+    ) -> None:
+        self.current_status = current_status
+
+        super().__init__(
+            "Задание нельзя повторно запустить "
+            f"из статуса {current_status.value}"
+        )
 
 
 @dataclass(frozen=True)
@@ -30,7 +49,10 @@ class CreateJobResult:
 class JobRepository:
     """Управляет заданиями, сохранёнными в SQLite."""
 
-    def __init__(self, database_path: Path) -> None:
+    def __init__(
+        self,
+        database_path: Path,
+    ) -> None:
         self._database_path = database_path
         self._lock = RLock()
 
@@ -49,7 +71,7 @@ class JobRepository:
         return connection
 
     def _initialize_database(self) -> None:
-        """Создать базу, таблицу и выполнить простую миграцию."""
+        """Создать базу, таблицы и выполнить миграции."""
 
         self._database_path.parent.mkdir(
             parents=True,
@@ -65,14 +87,17 @@ class JobRepository:
                 """
                 CREATE TABLE IF NOT EXISTS jobs (
                     request_id TEXT PRIMARY KEY,
-                    task_id INTEGER NOT NULL,
+                    external_request_id TEXT,
 
+                    task_id INTEGER NOT NULL,
                     document_type TEXT NOT NULL,
                     document_number TEXT NOT NULL,
                     user_code TEXT NOT NULL,
 
                     context_json TEXT NOT NULL,
                     status TEXT NOT NULL,
+
+                    attempt_count INTEGER NOT NULL DEFAULT 1,
 
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -94,12 +119,20 @@ class JobRepository:
                 ).fetchall()
             }
 
-            # Миграция существующей базы.
             if "external_request_id" not in columns:
                 connection.execute(
                     """
                     ALTER TABLE jobs
                     ADD COLUMN external_request_id TEXT
+                    """
+                )
+
+            if "attempt_count" not in columns:
+                connection.execute(
+                    """
+                    ALTER TABLE jobs
+                    ADD COLUMN attempt_count
+                    INTEGER NOT NULL DEFAULT 1
                     """
                 )
 
@@ -144,13 +177,18 @@ class JobRepository:
 
         return JobResponse(
             request_id=UUID(row["request_id"]),
-            external_request_id=row["external_request_id"],
+            external_request_id=(
+                row["external_request_id"]
+            ),
             task_id=row["task_id"],
             document_type=row["document_type"],
             document_number=row["document_number"],
             user_code=row["user_code"],
-            context=json.loads(row["context_json"]),
+            context=json.loads(
+                row["context_json"]
+            ),
             status=JobStatus(row["status"]),
+            attempt_count=row["attempt_count"],
             created_at=datetime.fromisoformat(
                 row["created_at"]
             ),
@@ -169,12 +207,7 @@ class JobRepository:
         existing_job: JobResponse,
         payload: ScanRequest,
     ) -> None:
-        """
-        Проверить, что повторный запрос содержит те же данные.
-
-        Если external_request_id тот же, а данные отличаются,
-        запрос считается конфликтующим.
-        """
+        """Проверить данные повторного запроса."""
 
         is_same_request = (
             existing_job.task_id == payload.task_id
@@ -184,7 +217,8 @@ class JobRepository:
             == payload.document_number
             and existing_job.user_code
             == payload.user_code
-            and existing_job.context == payload.context
+            and existing_job.context
+            == payload.context
         )
 
         if not is_same_request:
@@ -197,15 +231,13 @@ class JobRepository:
         self,
         payload: ScanRequest,
     ) -> CreateJobResult:
-        """
-        Создать задание или вернуть существующее.
-
-        Один external_request_id соответствует одному заданию.
-        """
+        """Создать задание или вернуть существующее."""
 
         with self._lock:
-            existing_job = self.get_by_external_request_id(
-                payload.external_request_id
+            existing_job = (
+                self.get_by_external_request_id(
+                    payload.external_request_id
+                )
             )
 
             if existing_job is not None:
@@ -232,6 +264,7 @@ class JobRepository:
                 user_code=payload.user_code,
                 context=payload.context,
                 status=JobStatus.ACCEPTED,
+                attempt_count=1,
                 created_at=now,
                 updated_at=now,
                 source_file=None,
@@ -254,6 +287,7 @@ class JobRepository:
                             user_code,
                             context_json,
                             status,
+                            attempt_count,
                             created_at,
                             updated_at,
                             source_file,
@@ -263,7 +297,8 @@ class JobRepository:
                             error
                         )
                         VALUES (
-                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                            ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?, ?
                         )
                         """,
                         (
@@ -279,6 +314,7 @@ class JobRepository:
                                 sort_keys=True,
                             ),
                             job.status.value,
+                            job.attempt_count,
                             job.created_at.isoformat(),
                             job.updated_at.isoformat(),
                             job.source_file,
@@ -290,8 +326,6 @@ class JobRepository:
                     )
 
             except sqlite3.IntegrityError:
-                # Дополнительная защита на случай,
-                # если одинаковые запросы пришли одновременно.
                 existing_job = (
                     self.get_by_external_request_id(
                         payload.external_request_id
@@ -320,13 +354,11 @@ class JobRepository:
         self,
         payload: ScanRequest,
     ) -> JobResponse:
-        """
-        Создать задание.
+        """Создать задание."""
 
-        Метод сохранён для совместимости с существующими тестами.
-        """
-
-        return self.create_or_get(payload).job
+        return self.create_or_get(
+            payload
+        ).job
 
     def get(
         self,
@@ -356,7 +388,7 @@ class JobRepository:
         self,
         external_request_id: str,
     ) -> JobResponse | None:
-        """Найти задание по ID внешнего запроса."""
+        """Получить задание по внешнему ID."""
 
         with self._lock:
             with self._connect() as connection:
@@ -509,6 +541,79 @@ class JobRepository:
 
                 if cursor.rowcount == 0:
                     return None
+
+        return self.get(request_id)
+
+    def prepare_retry(
+        self,
+        request_id: UUID,
+    ) -> JobResponse | None:
+        """
+        Подготовить failed или cancelled задание
+        к повторному запуску.
+        """
+
+        retryable_statuses = {
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        }
+
+        with self._lock:
+            current_job = self.get(
+                request_id
+            )
+
+            if current_job is None:
+                return None
+
+            if current_job.status not in retryable_statuses:
+                raise RetryNotAllowedError(
+                    current_status=current_job.status
+                )
+
+            updated_at = datetime.now(
+                timezone.utc
+            ).isoformat()
+
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    UPDATE jobs
+                    SET
+                        status = ?,
+                        attempt_count = attempt_count + 1,
+                        updated_at = ?,
+                        source_file = NULL,
+                        result_file = NULL,
+                        result_filename = NULL,
+                        sha256 = NULL,
+                        error = NULL
+                    WHERE
+                        request_id = ?
+                        AND status IN (?, ?)
+                    """,
+                    (
+                        JobStatus.ACCEPTED.value,
+                        updated_at,
+                        str(request_id),
+                        JobStatus.FAILED.value,
+                        JobStatus.CANCELLED.value,
+                    ),
+                )
+
+                if cursor.rowcount == 0:
+                    refreshed_job = self.get(
+                        request_id
+                    )
+
+                    if refreshed_job is None:
+                        return None
+
+                    raise RetryNotAllowedError(
+                        current_status=(
+                            refreshed_job.status
+                        )
+                    )
 
         return self.get(request_id)
 

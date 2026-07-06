@@ -85,6 +85,16 @@ class CancelJobResponse(BaseModel):
     message: str
 
 
+class RetryJobResponse(BaseModel):
+    """Ответ после повторного запуска задания."""
+
+    status: Literal["accepted"]
+    request_id: UUID
+    job_status: JobStatus
+    attempt_count: int
+    message: str
+
+
 class JobResponse(BaseModel):
     """Текущее состояние задания."""
 
@@ -98,6 +108,11 @@ class JobResponse(BaseModel):
 
     context: dict[str, Any]
     status: JobStatus
+
+    attempt_count: int = Field(
+        ge=1,
+        description="Количество попыток обработки задания",
+    )
 
     created_at: datetime
     updated_at: datetime

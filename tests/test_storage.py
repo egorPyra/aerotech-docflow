@@ -151,4 +151,4 @@ def test_archive_pdf(
     ).hexdigest()
 
     assert result.sha256 == expected_hash
-    assert result.path.read_bytes() == source_content
+    assert result.path.read_bytes() == source_content   
